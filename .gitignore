@@ -1,0 +1,6 @@
+# Local drafts and captures. README screenshots live in docs/screenshots.
+/logo-concepts/
+/*.png
+/*.mp4
+/*.zip
+node_modules/

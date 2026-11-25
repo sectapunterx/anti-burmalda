@@ -1,0 +1,13 @@
+Offline optical character recognition
+
+Tesseract.js-core 7.0.0 (LSTM build)
+https://github.com/naptha/tesseract.js-core
+Bundled files: tesseract-core-lstm.js and tesseract-core-lstm.wasm.
+Tesseract and the distributed core use the Apache License, Version 2.0.
+See LICENSE and upstream for component notices.
+
+Tesseract tessdata_fast 4.1.0 (Apache License, Version 2.0)
+https://github.com/tesseract-ocr/tessdata_fast/tree/4.1.0
+eng.traineddata  SHA-256 7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2
+rus.traineddata  SHA-256 e16e5e036cce1d9ec2b00063cf8b54472625b9e14d893a169e2b0dedeb4df225
+

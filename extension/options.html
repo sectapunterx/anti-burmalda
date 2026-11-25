@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Реестр · Анти-бурмалда</title>
+    <link rel="icon" href="icons/32.png" />
+    <link rel="stylesheet" href="ui.css" />
+    <script src="catalog.js" defer></script>
+    <script src="logo-catalog.js" defer></script>
+    <script src="logomatch.js" defer></script>
+    <script src="registry.js" defer></script>
+    <script src="vision.js" defer></script>
+    <script src="ui.js" defer></script>
+  </head>
+  <body>
+    <header>
+      <div class="bar">
+        <div class="brand">
+          <img class="wordmark" src="icons/wordmark.svg" width="186" height="33" alt="анти-бурмалда" />
+        </div>
+        <label class="switch-line"
+          ><span id="power-label">Защита</span
+          ><input
+            id="enabled"
+            type="checkbox"
+            role="switch"
+            aria-label="Защита"
+        /></label>
+      </div>
+    </header>
+    <main>
+      <h1>Реестр блокировок</h1>
+      <p class="lead">
+        Добавьте название, домен или образец рекламы. Правило начнёт работать на
+        открытых сайтах.
+      </p>
+      <div class="layout">
+        <section class="panel add">
+          <h2>Новое правило</h2>
+          <form id="add">
+            <label for="kind">Тип правила</label>
+            <select id="kind">
+              <option value="name">Название или фраза</option>
+              <option value="domain">Домен</option>
+              <option value="logo">Логотип или баннер</option>
+              <option value="clip">Видеовставка</option>
+            </select>
+            <label id="value-label" for="value">Название или фраза</label
+            ><input
+              id="value"
+              type="text"
+              required
+              maxlength="100"
+              autocomplete="off"
+            />
+            <div id="upload" hidden>
+              <label for="file">Файл образца</label
+              ><input type="file" id="file" />
+            </div>
+            <p class="hint" id="rule-help"></p>
+            <button class="primary" id="save">Добавить в реестр</button>
+          </form>
+          <p id="form-status" class="status" role="status"></p>
+        </section>
+        <section class="panel list-panel">
+          <div class="list-heading">
+            <h2>Правила</h2>
+            <span class="counter" id="total">0</span>
+          </div>
+          <input
+            type="search"
+            id="search"
+            aria-label="Поиск по реестру"
+            placeholder="Найти правило…"
+          />
+          <ul id="entries"></ul>
+          <p id="empty" hidden>Совпадений нет.</p>
+        </section>
+      </div>
+      <section class="panel settings">
+        <h2>Маскирование</h2>
+        <label class="option"><span><b>Текст замены</b><small>Эта подпись появляется на месте упоминаний, в том числе команд чата.</small></span>
+          <input id="replacementText" maxlength="48" placeholder="анти-бурмалда" aria-label="Текст замены"></label>
+        <label class="option"><span><b>Совпадение логотипа · <output id="logo-percent">86%</output></b>
+          <small>Выше — строже сравнение. Снизьте порог, если мелкий или сжатый знак пропускается.</small></span>
+          <input id="logoThreshold" type="range" min="78" max="97" step="1" value="86"></label>
+        <label class="option">
+          <span><b>Озвучивать «бурмалда» на YouTube</b><small>Заменяет слово в звуке, когда известны его границы. Если известно только время реплики, сохраняется исходный звук.</small></span>
+          <input id="youtubeVoice" type="checkbox" role="switch">
+        </label>
+        <label class="option"
+          ><span
+            ><b>Читать надписи на изображениях и в видео</b
+            ><small
+              >Распознавание русского и английского текста работает на
+              устройстве и использует процессор.</small
+            ></span
+          ><input id="ocr" type="checkbox" role="switch"
+        /></label>
+        <label class="option"
+          ><span
+            ><b>Логотип на маске</b
+            ><small
+              >Если выключить, реклама закрывается чёрным
+              прямоугольником.</small
+            ></span
+          ><input id="branded" type="checkbox" role="switch"
+        /></label>
+        <label class="option"
+          ><span
+            ><b>Закрывать видео с недоступными кадрами</b
+            ><small
+              >Если браузер запрещает анализ кадров, весь ролик будет скрыт и
+              приглушён. Это затронет и обычные видео.</small
+            ></span
+          ><input id="strictVideo" type="checkbox" role="switch"
+        /></label>
+      </section>
+      <p class="foot">Реестр и обработка образцов остаются в этом браузере.</p>
+      <p role="status" id="status"></p>
+    </main>
+  </body>
+</html>

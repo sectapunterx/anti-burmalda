@@ -1,0 +1,8 @@
+::highlight(anti-burmalda-mentions) {
+  background-color: #baf3d0 !important;
+  color: #123b27 !important;
+  text-decoration: underline;
+  text-shadow: none !important;
+}
+[data-ab-auto-cc] .ytp-caption-window-container { opacity: 0 !important; }
+[data-ab-auto-cc] video::cue { color: transparent; background: transparent; }

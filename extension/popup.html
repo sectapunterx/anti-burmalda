@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <title>Анти-бурмалда</title>
+    <link rel="stylesheet" href="ui.css" />
+    <script src="catalog.js" defer></script>
+    <script src="logo-catalog.js" defer></script>
+    <script src="registry.js" defer></script>
+    <script src="ui.js" defer></script>
+  </head>
+  <body class="popup">
+    <div class="brand">
+      <img class="wordmark" src="icons/wordmark.svg" width="186" height="33" alt="анти-бурмалда" />
+    </div>
+    <label class="power"
+      ><span id="power-label">Защита</span
+      ><input id="enabled" type="checkbox" role="switch" aria-label="Защита"
+    /></label>
+    <p id="summary"></p>
+    <button id="edit-page" class="primary">Добавить правило на странице <span aria-hidden="true">＋</span></button>
+    <button id="open" class="secondary">
+      Открыть реестр <span aria-hidden="true">↗</span>
+    </button>
+    <p id="status" role="status"></p>
+  </body>
+</html>
