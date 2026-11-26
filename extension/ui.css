@@ -54,8 +54,8 @@ main {
 }
 .popup .wordmark {
   background:#10281d;
-  width:196px;
-  height:40px;
+  width:216px;
+  height:58px;
   padding:4px 8px;
 }
 .option #replacementText {width:clamp(120px,32%,210px);}

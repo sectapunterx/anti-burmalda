@@ -6,7 +6,7 @@ const BurmaldaRecording = new WeakSet();
     vision = BurmaldaVision;
   const ns = "http://www.w3.org/2000/svg";
   const ignored =
-    "script,style,noscript,template,textarea,input,select,[contenteditable]:not([contenteditable=false]),[data-ab-filter-root],[data-ab-editor]";
+    "script,style,noscript,template,textarea,input,select,[contenteditable]:not([contenteditable=false]),[data-ab-filter-root],[data-ab-editor],[data-ab-timeline]";
   const mediaSelector =
     "img,video,iframe,a,[aria-label],[title],[style*='url(' i],[role=img]";
   const backgroundSelector =
@@ -18,9 +18,11 @@ const BurmaldaRecording = new WeakSet();
     scanWinline = false,
     logos = [],
     templates = [],
+    fastPanels = [],
     regionRules = [],
     animations = [],
     clips = [],
+    rememberedSkips = [],
     generation = 0;
   let roots = new Set(),
     sweep = [],
@@ -43,6 +45,7 @@ const BurmaldaRecording = new WeakSet();
   let count = 0;
   const changeObserver = new MutationObserver((changes) => {
     for (const c of changes) {
+      if (c.target.closest?.("[data-ab-timeline]")) continue;
       if (
         c.target.parentElement?.closest("[data-ab-filter-root]") ||
         c.target.closest?.("[data-ab-filter-root]")
@@ -175,6 +178,7 @@ const BurmaldaRecording = new WeakSet();
       colorInterpolationFilters: "sRGB",
     });
     const merge = svg("feMerge");
+    const badges = [];
     merge.append(svg("feMergeNode", { in: "SourceGraphic" }));
     for (const [index, box] of boxes.entries()) {
       // Extend each region slightly to cover anti-aliased boundaries.
@@ -196,15 +200,17 @@ const BurmaldaRecording = new WeakSet();
       if (state.branded) {
         const boxWidth=width*(el.clientWidth||1),boxHeight=height*(el.clientHeight||1);
         const wide=boxWidth/boxHeight>=2.7;
-        const badgeWidth=width*Math.min(.92,(wide?230:124)/boxWidth);
-        const badgeHeight=height*Math.min(.92,(wide?44:82)/boxHeight);
+        const assetWidth = wide ? 248 : 128, assetHeight = wide ? 62 : 100;
+        const scale = Math.min(1, boxWidth * .92 / assetWidth, boxHeight * .92 / assetHeight);
+        const badgeWidth = width * assetWidth * scale / boxWidth;
+        const badgeHeight = height * assetHeight * scale / boxHeight;
+        const badge = { x: x + (width-badgeWidth)/2, y: y + (height-badgeHeight)/2,
+          width: badgeWidth, height: badgeHeight };
+        badges.push(badge);
         f.append(
           svg("feImage", {
             href: chrome.runtime.getURL(wide ? "icons/wordmark.svg" : "icons/wordmark-compact.svg"),
-            x: x + (width-badgeWidth)/2,
-            y: y + (height-badgeHeight)/2,
-            width: badgeWidth,
-            height: badgeHeight,
+            ...badge,
             preserveAspectRatio: "xMidYMid meet",
             result: "badge" + index,
           }),
@@ -217,6 +223,7 @@ const BurmaldaRecording = new WeakSet();
     m = {
       key,
       filter: f,
+      badges,
       original: el.style.getPropertyValue("filter"),
       priority: el.style.getPropertyPriority("filter"),
     };
@@ -489,7 +496,7 @@ const BurmaldaRecording = new WeakSet();
     for (const table of [videos, pictures])
       for (const [el, info] of table)
         if (!el.isConnected) {
-          if (table === videos) { info.speech?.dispose(); restoreMute(el, info); }
+          if (table === videos) { info.timeline?.remove(); info.speech?.dispose(); restoreMute(el, info); }
           viewport.unobserve(el);
           visible.delete(el);
           table.delete(el);
@@ -572,6 +579,7 @@ const BurmaldaRecording = new WeakSet();
       info.templateBoxes=[];
       info.unreadable = false;
       info.hit = null;
+      info.clipBoxes = [];
       info.logoCursor = 0;
       info.moreLogos = false;
       info.ocrBox = null;
@@ -656,21 +664,47 @@ const BurmaldaRecording = new WeakSet();
     // search through every registered template, including on paused players.
     const remaining=[];
     for(const old of info.templateBoxes || []) {
-      const current=BurmaldaLogos.refine(frame,old.rule.pattern,{...old,score:0});
-      if(current.score>=threshold)remaining.push({...current,seen:time});
-      else if(time>=old.seen && time-old.seen<1.4)remaining.push(old);
+      const current=old.rule.pattern.panelPhases ? null : BurmaldaLogos.refine(frame,old.rule.pattern,{...old,score:0});
+      const cutoff=Math.max(threshold,old.rule.minScore);
+      const display=current && (current.score>=cutoff || old.rule.pattern.layouts?.length) &&
+        BurmaldaLogos.displayBox(frame,current,old.rule,cutoff);
+      if(display) remaining.push({...current,display,seen:time,supported:time});
+      else if(old.probe && BurmaldaLogos.confirmPanel(frame,old.rule.pattern.panelPhases,old.probe,cutoff))
+        remaining.push({...old,supported:time});
+      else if(old.rule.pattern.panelColour==="yellow" && time>=old.seen && time-old.seen<28 &&
+          BurmaldaLogos.panelStillVisible(frame,old)) remaining.push({...old,supported:time});
+      else if(time>=old.seen && time-old.seen<18 && old.palette &&
+          BurmaldaLogos.sameColours(old.palette,BurmaldaLogos.colours(frame,BurmaldaLogos.bannerBox(old,old.rule.anchor))))
+        remaining.push({...old,supported:time});
+      else if(!old.rule.rotating && time>=old.seen && time-(old.supported ?? old.seen)<(old.rule.pattern.panelPhases ? 2.8 : 1.4))
+        remaining.push(old);
     }
-    const index=info.templateCursor || 0, rule=templates[index];
-    const hits=BurmaldaLogos.locate(BurmaldaLogos.pyramid(frame),rule.pattern,threshold);
-    for(const hit of hits) {
-      const known=remaining.findIndex(b=>b.rule===rule && BurmaldaLogos.overlap(b,hit)>.52);
-      const item={...hit,rule,seen:time};
-      if(known<0) remaining.push(item);
-      else remaining[known]=item;
+    let pyramid;
+    function scan(candidate) {
+      const levels=candidate.pattern.panelPhases ? [frame] : (pyramid ??= BurmaldaLogos.pyramid(frame));
+      const cutoff=Math.max(threshold,candidate.minScore);
+      for(const hit of BurmaldaLogos.locate(levels,candidate.pattern,cutoff)) {
+        const display=BurmaldaLogos.displayBox(frame,hit,candidate,cutoff);
+        if(!display) continue;
+        const known=remaining.findIndex(b=>b.rule===candidate && BurmaldaLogos.overlap(b,hit)>.52);
+        const item={...hit,display,rule:candidate,seen:time};
+        if(candidate.anchor && !candidate.rotating) item.palette=BurmaldaLogos.colours(frame,BurmaldaLogos.bannerBox(hit,candidate.anchor));
+        if(known<0) remaining.push(item);
+        else remaining[known]=item;
+      }
     }
+    for(const panel of fastPanels) scan(panel);
+    const deadline=performance.now()+20;
+    let checked=0, index=info.templateCursor || 0;
+    do {
+      const candidate=templates[index];
+      if(!candidate.pattern.panelPhases) scan(candidate);
+      index=(index+1)%templates.length;
+      checked++;
+    } while(checked<Math.min(3,templates.length) && performance.now()<deadline);
     info.templateBoxes=remaining;
-    info.templateCursor=(index+1)%templates.length;
-    info.pausedScans=(info.templateTime===time ? info.pausedScans : 0)+1;
+    info.templateCursor=index;
+    info.pausedScans=(info.templateTime===time ? info.pausedScans : 0)+checked;
     info.templateTime=time;
   }
   function checkVideo(v, info) {
@@ -679,7 +713,21 @@ const BurmaldaRecording = new WeakSet();
       info.src = v.currentSrc;
       info.stream = v.srcObject;
     }
+    const recording = clips.length ? vision.clipSource(v) : null;
+    let ranges = [];
+    if (clips.length) {
+      const timeline = info.timeline ??= new BurmaldaTimeline(v);
+      if (!timeline.matches(recording)) timeline.reset(recording);
+      ranges = clips.filter(r => r.clipAction !== "mask" && r.origin && r.origin.source === recording)
+        .map(r => ({id:r.id, start:r.origin.start, end:r.origin.start+r.duration}));
+      if (recording) ranges.push(...rememberedSkips.filter(r => r.source === recording && skipIds.has(r.id)));
+      ranges.push(...timeline.found.filter(local => skipIds.has(local.id) && !ranges.some(r => r.id === local.id && Math.abs(r.start-local.start)<1)));
+      timeline.draw(ranges);
+    }
     if (BurmaldaRecording.has(v)) { videoMask(v, info, null, false); return; }
+    for (const range of ranges) {
+      if (v.currentTime >= range.start && v.currentTime < range.end && skipConfirmedClip(v, range.end)) return;
+    }
     const cover = info.label || (!BurmaldaSpeech.supported && captions(v));
     if ((cover && !clips.length) || (state.strictVideo && v.mediaKeys)) {
       videoMask(v, info, vision.full, true);
@@ -722,23 +770,43 @@ const BurmaldaRecording = new WeakSet();
         now - info.last > 2.5 * Math.max(1, v.playbackRate)
       )
         resetVideo(v);
-      let frame;
+      let frame, clipFrame;
       try {
         frame = vision.surface(v, v.videoWidth, v.videoHeight);
+        if (clips.some(rule => rule.crop))
+          clipFrame = vision.surface(v, v.videoWidth, v.videoHeight, vision.clipEdge);
       } catch (e) {
         if (e.name === "SecurityError") info.unreadable = true;
       }
       if (frame) {
         info.hit = null;
+        info.clipBoxes = [];
         info.tracks ??= new Map();
         for (const rule of clips) {
           if (!info.tracks.has(rule.id)) info.tracks.set(rule.id, {});
-          if (vision.clipMatch(frame, rule, now, info.tracks.get(rule.id))) {
-            info.hit = vision.full;
-            if (skipConfirmedClip(v, info.tracks.get(rule.id).until)) break;
+          const source = rule.crop ? clipFrame : frame;
+          const track = info.tracks.get(rule.id);
+          const markedEnd = rule.origin && rule.origin.source === recording &&
+            now >= rule.origin.start && now < rule.origin.start + rule.duration
+            ? rule.origin.start + rule.duration : null;
+          if (markedEnd !== null || (source && vision.clipMatch(source, rule, now, track))) {
+            if (rule.clipAction !== "mask" && markedEnd === null && track.until > now &&
+                (Number.isFinite(v.duration) || v.seekable.length)) {
+              const start = Math.max(0, track.until - rule.duration);
+              if (!ranges.some(r => r.id === rule.id && Math.abs(r.start - start) < 1)) {
+                const range = {id:rule.id, start, end:track.until};
+                info.timeline.found.push(range);
+                if (info.timeline.found.length > 256) info.timeline.found.shift();
+                ranges.push(range);
+                info.timeline.draw(ranges);
+                if (recording) chrome.runtime.sendMessage({action:"remember-skip", source:recording, ...range}).catch(() => {});
+              }
+            }
+            if (rule.clipAction !== "mask" && skipConfirmedClip(v, markedEnd ?? track.until)) break;
+            info.clipBoxes.push(rule.crop || vision.full);
           }
         }
-        if (!info.hit) info.hit = findLogo(frame, info, v);
+        info.hit = findLogo(frame, info, v);
         info.last = now;
       }
     }
@@ -746,14 +814,14 @@ const BurmaldaRecording = new WeakSet();
       try{scanTemplates(v,info,now);}
       catch(e){if(e.name==="SecurityError")info.unreadable=true;}
     }
-    const full = cover || info.hit === vision.full || (info.unreadable && state.strictVideo);
-    const regions = [info.hit, info.ocrBox, ...(info.artwork || []), ...(info.templateBoxes || [])].filter(Boolean);
+    const full = cover || info.hit === vision.full || info.clipBoxes?.includes(vision.full) || (info.unreadable && state.strictVideo);
+    const badges = (info.templateBoxes || []).map(hit => hit.display);
+    const regions = [...(info.clipBoxes || []), info.hit, info.ocrBox, ...(info.artwork || []), ...badges].filter(Boolean);
     videoMask(v, info, full ? vision.full : regions.map(b => mappedBox(v, b, null)).filter(Boolean), full);
   }
   function skipConfirmedClip(video, until) {
-    if (!Number.isFinite(until) || !Number.isFinite(video.duration) || video.paused ||
-        video.srcObject || video.closest(".ytp-live")) return false;
-    const end=Math.min(until,video.duration);
+    if (!Number.isFinite(until) || video.paused || video.seeking) return false;
+    const end=Number.isFinite(video.duration) ? Math.min(until,video.duration) : until;
     if (end<=video.currentTime+.18) return false;
     for (let i=0;i<video.seekable.length;i++) {
       if (video.seekable.start(i)>video.currentTime || end>video.seekable.end(i)+.03) continue;
@@ -798,7 +866,9 @@ const BurmaldaRecording = new WeakSet();
       if(!info.visual) info.visual = frame && findLogo(frame, info, el);
       if(frame && info.templateCursor<templates.length) {
         const rule=templates[info.templateCursor++];
-        info.templateBoxes.push(...BurmaldaLogos.locate(BurmaldaLogos.pyramid(frame),rule.pattern,state.logoThreshold??86));
+        const cutoff=Math.max(state.logoThreshold??86,rule.minScore);
+        const hits=BurmaldaLogos.locate(BurmaldaLogos.pyramid(frame),rule.pattern,cutoff);
+        info.templateBoxes.push(...hits.map(hit=>BurmaldaLogos.displayBox(frame,hit,rule,cutoff)).filter(Boolean));
       }
       if (frame && scanWinline && !info.artwork) info.artwork = BurmaldaCampaign.detect(frame);
       info.done = !frame || (!info.moreLogos && info.templateCursor>=templates.length);
@@ -826,7 +896,7 @@ const BurmaldaRecording = new WeakSet();
         info.visual ||
         info.ocrDone ||
         info.unreadable ||
-        info.hit === vision.full
+        info.hit === vision.full || info.clipBoxes?.includes(vision.full)
       )
         continue;
       const rect = el.getBoundingClientRect();
@@ -971,6 +1041,31 @@ const BurmaldaRecording = new WeakSet();
   document.addEventListener(
     "click",
     (e) => {
+      if (state?.branded && e.isTrusted && e.detail > 0 && marked.size &&
+          !e.composedPath().some(el => el.hasAttribute?.("data-ab-editor"))) {
+        const target = e.composedPath()[0];
+        // Player controls often sit in a transparent layer above the filtered video.
+        const root = target.getRootNode();
+        const stack = root.elementsFromPoint?.(e.clientX, e.clientY) || [];
+        for (const el of stack) {
+          const mark = marked.get(el);
+          if (!mark?.badges.length) continue;
+          if (!e.composedPath().includes(el)) {
+            const player = el.localName === "video" && (el.closest(
+              "[data-a-target='video-player'],.html5-video-player,.video-js,.jwplayer") || el.parentElement);
+            if (!player || !player.contains(target) || target.closest("a,button,input,[role=button]")) continue;
+          }
+          const bounds = el.getBoundingClientRect();
+          const x = (e.clientX - bounds.left) / bounds.width;
+          const y = (e.clientY - bounds.top) / bounds.height;
+          if (mark.badges.some(b => x >= b.x && x <= b.x+b.width && y >= b.y && y <= b.y+b.height)) {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            window.open("https://github.com/sectapunterx/anti-burmalda", "_blank", "noopener,noreferrer");
+            return;
+          }
+        }
+      }
       const a = e.composedPath().find((n) => n?.localName === "a");
       if (a && state?.enabled && (marked.has(a) || plainAdLinks.has(a))) {
         e.preventDefault();
@@ -992,7 +1087,7 @@ const BurmaldaRecording = new WeakSet();
     pinned.clear();
     automaticBoxes = new WeakMap();
     for (const [el] of marked) mask(el, null);
-    for (const [v, info] of videos) { info.speech?.dispose(); restoreMute(v, info); }
+    for (const [v, info] of videos) { info.timeline?.remove(); info.speech?.dispose(); restoreMute(v, info); }
     for (const p of planes.values()) p.remove();
     for (const root of roots)
       if (root.host && rootSheets.has(root)) {
@@ -1018,7 +1113,8 @@ const BurmaldaRecording = new WeakSet();
     logos = visualRules.filter(e => e.sample);
     const portable=visualRules.filter(e=>e.template);
     templates=[...portable.filter(e=>!e.id.startsWith("catalog:")).reverse(),...portable.filter(e=>e.id.startsWith("catalog:"))]
-      .map(e=>({id:e.id,pattern:BurmaldaLogos.prepare(e.template)})).filter(e=>e.pattern);
+      .map(e=>({id:e.id,pattern:BurmaldaLogos.prepareRule(e),anchor:e.anchor,rotating:e.rotating,minScore:e.minScore || 0})).filter(e=>e.pattern);
+    fastPanels=templates.filter(e=>e.pattern.panelPhases);
     regionRules = visualRules.filter(e => e.region).map(e => e.region);
     animations = next.entries.filter(e=>e.kind==="animation").map(e=>e.asset ? e :
       {...e,cycle:BurmaldaAnimation.compile(e.cycle),tracks:new WeakMap()});
@@ -1028,6 +1124,7 @@ const BurmaldaRecording = new WeakSet();
     }
     refreshPins();
     clips = next.entries.filter((e) => e.kind === "clip");
+    skipIds = new Set(clips.filter(r => r.clipAction !== "mask").map(r => r.id));
     CSS.highlights.set("anti-burmalda-mentions", highlight);
     watch(document);
     enqueue(document.documentElement || document);
@@ -1035,12 +1132,21 @@ const BurmaldaRecording = new WeakSet();
     mediaTimer = setInterval(tick, 450);
   }
   const rootSheets = new WeakMap();
+  let skipIds = new Set();
+  function repositionTimelines() {
+    for (const info of videos.values()) info.timeline?.position();
+  }
+  window.addEventListener("scroll", repositionTimelines, {capture:true, passive:true});
+  window.addEventListener("resize", repositionTimelines);
+  document.addEventListener("fullscreenchange", repositionTimelines);
   chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === "local" && changes.clipRanges) rememberedSkips = changes.clipRanges.newValue || [];
     if (area === "local" && changes.registry)
       configure(changes.registry.newValue || reg.defaults());
   });
   const initialGeneration = generation;
-  chrome.storage.local.get("registry").then((r) => {
+  chrome.storage.local.get(["registry","clipRanges"]).then((r) => {
+    rememberedSkips = r.clipRanges || [];
     if (generation === initialGeneration)
       configure(r.registry || reg.defaults());
   });

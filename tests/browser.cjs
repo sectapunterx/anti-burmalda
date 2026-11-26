@@ -2,19 +2,21 @@
 const assert = require("node:assert/strict");
 const http = require("node:http");
 const path = require("node:path");
-const {checkEditor,checkYoutube,checkPinnedRegions} = require("./authoring.cjs");
+const {checkEditor,checkLongClip,checkPromoBanner,checkYoutube,checkPinnedRegions} = require("./authoring.cjs");
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || "playwright");
 const extension = path.resolve(__dirname, "../extension");
 
 async function main() {
   let movie = Buffer.alloc(0);
+  const longMovie = require("node:fs").readFileSync(path.join(__dirname,"fixtures/seekable-102s.webm"));
   let artwork;
   const server = http.createServer((req, res) => {
     if (req.url === "/art.png") {
       res.writeHead(200, { "Content-Type": "image/png" });
       return res.end(artwork);
     }
-    if (req.url === "/movie.webm") {
+    if (req.url === "/movie.webm" || req.url === "/long.webm") {
+      const file = req.url === "/long.webm" ? longMovie : movie;
       const range = /bytes=(\d+)-/.exec(req.headers.range || "");
       const start = range ? Number(range[1]) : 0;
       res.writeHead(range ? 206 : 200, {
@@ -26,14 +28,14 @@ async function main() {
                 "bytes " +
                 start +
                 "-" +
-                (movie.length - 1) +
+                (file.length - 1) +
                 "/" +
-                movie.length,
+                file.length,
             }
           : {}),
-        "Content-Length": movie.length - start,
+        "Content-Length": file.length - start,
       });
-      return res.end(movie.subarray(start));
+      return res.end(file.subarray(start));
     }
     res.setHeader("Content-Type", "text/html;charset=utf-8");
     res.end(
@@ -125,6 +127,15 @@ async function main() {
     };
     assert.deepEqual(await cssPixel("a"), [0, 0, 0]);
     assert(await page.locator("feImage").first().evaluate(e=>e.getAttribute("href").includes("/wordmark")));
+    const repoUrl = "https://github.com/sectapunterx/anti-burmalda";
+    await ctx.route(repoUrl, route => route.fulfill({contentType: "text/plain", body: "Repository"}));
+    const [repo] = await Promise.all([
+      ctx.waitForEvent("page", {timeout: 5000}),
+      page.locator("a").first().click(),
+    ]);
+    await repo.waitForURL(repoUrl);
+    await repo.close();
+    await page.bringToFront();
     const dnr = await ui.evaluate(() =>
       chrome.declarativeNetRequest.getDynamicRules(),
     );
@@ -289,6 +300,16 @@ async function main() {
     // proper finite duration for the file-import test using the browser muxer fixture below.
     movie = withDuration(movie, 3200);
     await checkEditor(page, ui);
+    await checkLongClip(page, ui);
+    await checkPromoBanner(page, ui);
+    await checkCompactCycle(page,root);
+    await checkSponsorRotation(page,root);
+    await checkPrizeAndGameplay(page);
+    await ui.locator("#kind").selectOption("clip");
+    await ui.locator("#value").fill("Long upload");
+    await ui.locator("#file").setInputFiles({name:"long.webm",mimeType:"video/webm",buffer:longMovie});
+    await ui.locator("#save").click();
+    await ui.getByRole("button",{name:"Удалить правило «Long upload»"}).click();
     await checkYoutube(ctx, movie);
     await ui.locator("#kind").selectOption("clip");
     await ui.locator("#value").fill("Вставка");
@@ -303,8 +324,8 @@ async function main() {
     await ui
       .getByRole("button", { name: "Удалить правило «Вставка»" })
       .waitFor();
+    await page.goto(root);
     await page.evaluate(() => {
-      clearInterval(window.redraw);
       document.querySelector("#fixture").replaceChildren();
       const v = document.createElement("video");
       v.id = "repeat";
@@ -478,6 +499,137 @@ async function checkStreamAds(page, cssPixel) {
   console.log("PASS neutral and branded channel cards, command-only text redaction, panel and two separate in-stream masks");
 }
 
+async function checkCompactCycle(page,root) {
+  await page.goto(root+"/compact-phase");
+  await page.bringToFront();
+  const sheet=require("node:fs").readFileSync(path.join(__dirname,"fixtures/bb-promo-cycle.webp"));
+  await page.evaluate(async data=>{
+    const img=new Image();
+    img.src="data:image/webp;base64,"+data;
+    await img.decode();
+    const canvas=document.createElement("canvas");
+    canvas.width=960;canvas.height=540;
+    const ctx=canvas.getContext("2d");
+    const video=document.createElement("video");
+    document.querySelector("#fixture").replaceChildren(video);
+    video.width=640;
+    const draw=()=>{
+      ctx.fillStyle="#283b42";ctx.fillRect(0,0,960,540);
+      if(window.phase>=0)ctx.drawImage(img,145*window.phase,0,145,70,66,200,145,70);
+    };
+    window.phase=3; // square emblem, before any wide phase has been shown
+    draw();setInterval(draw,70);
+    video.srcObject=canvas.captureStream(15);
+    await video.play();
+    window.covered=()=>{
+      const id=video.style.filter.match(/#([^"]+)/)?.[1];
+      return !video.muted && [...(document.getElementById(id)?.querySelectorAll("feFlood")||[])].some(node=>{
+        const [x,y,w,h]=["x","y","width","height"].map(k=>+node.getAttribute(k));
+        return x*960<=85 && (x+w)*960>=184 && y*540<=222 && (y+h)*540>=246 && w<.22;
+      });
+    };
+  },sheet.toString("base64"));
+  await page.waitForFunction(()=>window.covered(),null,{timeout:8000});
+  const uncovered=await page.evaluate(async()=>{
+    const missed=[];
+    for(let stage=0;stage<12;stage++){
+      window.phase=stage;
+      for(let i=0;i<6;i++){
+        await new Promise(r=>setTimeout(r,110));
+        if(!window.covered()) missed.push(stage);
+      }
+    }
+    window.phase=-1;
+    return missed;
+  });
+  assert.deepEqual(uncovered,[]);
+  await page.waitForFunction(()=>!document.querySelector("video").style.filter,null,{timeout:6500});
+  console.log("PASS compact BB emblem cold start, full-width mask throughout 12 recorded phases and release after exit");
+}
+async function checkSponsorRotation(page,root) {
+  await page.goto(root+"/sponsor-rotation");
+  const strip=require("node:fs").readFileSync(path.join(__dirname,"fixtures/rotating-sponsors.webp"));
+  await page.evaluate(async data=>{
+    const img=new Image();
+    img.src="data:image/webp;base64,"+data;
+    await img.decode();
+    const canvas=document.createElement("canvas");
+    canvas.width=960;canvas.height=540;
+    const ctx=canvas.getContext("2d");
+    const video=document.createElement("video");
+    document.querySelector("#fixture").replaceChildren(video);
+    video.width=640;
+    window.sponsor=0;
+    const draw=()=>{
+      ctx.fillStyle="#3c4449";ctx.fillRect(0,0,960,540);
+      ctx.drawImage(img,186*window.sponsor,0,186,48,120,180,140,36);
+    };
+    draw();setInterval(draw,70);
+    video.srcObject=canvas.captureStream(15);
+    await video.play();
+    window.sponsorMasked=()=>{
+      const id=video.style.filter.match(/#([^"]+)/)?.[1];
+      return [...(document.getElementById(id)?.querySelectorAll("feFlood")||[])].some(node=>{
+        const [x,y,w,h]=["x","y","width","height"].map(k=>+node.getAttribute(k));
+        return x*960<=145 && (x+w)*960>=215 && y*540<=192 && (y+h)*540>=205;
+      });
+    };
+  },strip.toString("base64"));
+  await page.waitForFunction(()=>window.sponsorMasked(),null,{timeout:16000});
+  await page.evaluate(()=>{window.sponsor=1;});
+  await page.waitForFunction(()=>!document.querySelector("video").style.filter,null,{timeout:2500});
+  assert.equal(await page.evaluate(async()=>{
+    for(let i=0;i<36;i++) {
+      await new Promise(resolve=>setTimeout(resolve,150));
+      if(document.querySelector("video").style.filter) return false;
+    }
+    return true;
+  }),true,"GGsel must remain visible through further template scans");
+  await page.evaluate(()=>{window.sponsor=2;});
+  await page.waitForFunction(()=>window.sponsorMasked(),null,{timeout:16000});
+  console.log("PASS rotating slate hides BetBoom, releases GGsel in the same slot and reacquires BB");
+}
+async function checkPrizeAndGameplay(page) {
+  const url="https://www.twitch.tv/test_prize_overlay";
+  await page.route(url,r=>r.fulfill({contentType:"text/html",body:"<video width=768></video>"}));
+  await page.goto(url);
+  const art=require("node:fs").readFileSync(path.join(__dirname,"fixtures/prize-and-gameplay.webp"));
+  await page.evaluate(async encoded=>{
+    const img=new Image();
+    img.src="data:image/webp;base64,"+encoded;
+    await img.decode();
+    const canvas=document.createElement("canvas");
+    canvas.width=768;canvas.height=432;
+    const ctx=canvas.getContext("2d"),v=document.querySelector("video");
+    ctx.imageSmoothingEnabled=false;
+    window.card=0;
+    function draw() {
+      ctx.fillStyle="#27333e";ctx.fillRect(0,0,768,432);
+      const sample=Math.floor(performance.now()/510)%4;
+      ctx.drawImage(img,sample*128,60,16,12,665,120,102,65);
+      if(window.card>=0)ctx.drawImage(img,window.card*128,0,128,60,40,20,128,60);
+    }
+    draw();setInterval(draw,65);
+    v.srcObject=canvas.captureStream(15);await v.play();
+    window.hasMaskAt=(x,y)=>{
+      const id=v.style.filter.match(/#([^"]+)/)?.[1];
+      return [...(document.getElementById(id)?.querySelectorAll("feFlood")||[])].some(n=>{
+        const [l,t,w,h]=["x","y","width","height"].map(k=>+n.getAttribute(k));
+        return l<=x/768 && l+w>=x/768 && t<=y/432 && t+h>=y/432;
+      });
+    };
+  },art.toString("base64"));
+  for(const card of [0,1,2,3]) {
+    await page.evaluate(k=>{window.card=k;},card);
+    await page.waitForFunction(()=>window.hasMaskAt(106,50),null,{timeout:4500});
+    await page.waitForTimeout(950);
+    assert.deepEqual(await page.evaluate(()=>[window.hasMaskAt(106,50),window.hasMaskAt(716,152)]),[true,false]);
+  }
+  await page.evaluate(()=>{window.card=-1;});
+  await page.waitForFunction(()=>!document.querySelector("video").style.filter,null,{timeout:5000});
+  await page.unroute(url);
+  console.log("PASS prize cards covered outside their recorded slot, dark gameplay clear, mask released");
+}
 function withDuration(bytes, ms) {
   const id = Buffer.from([0x15, 0x49, 0xa9, 0x66]),
     start = bytes.indexOf(id) + id.length;

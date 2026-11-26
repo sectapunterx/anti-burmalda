@@ -102,10 +102,16 @@ function add(state, input) {
     if (kind==="logo" && input.template) {
       if (!BurmaldaLogos.valid(input.template)) throw Error("Повреждённый образец логотипа.");
       entry.template=input.template;
+      if (input.anchor !== undefined) {
+        if (!BurmaldaLogos.validAnchor(input.anchor) || !BurmaldaLogos.prepare(input.template))
+          throw Error("Выделите постоянную часть внутри баннера.");
+        const {x,y,w,h} = input.anchor;
+        entry.anchor = {x,y,w,h};
+      }
     }
   } else if (kind === "clip") {
     if (
-      !(input.duration >= 1 && input.duration <= 60) ||
+      !Number.isFinite(input.duration) || input.duration < 1 ||
       !Array.isArray(input.frames) ||
       input.frames.length < 2 ||
       input.frames.length > 32
@@ -125,15 +131,34 @@ function add(state, input) {
     }
     entry.duration = input.duration;
     entry.frames = input.frames;
+    if (input.origin) {
+      const { source, start } = input.origin;
+      if (typeof source !== "string" || !source.length || source.length > 8192 ||
+          !Number.isFinite(start) || start < 0) throw Error("Неверная отметка начала фрагмента.");
+      entry.origin = { source, start };
+    }
+    if (input.crop !== undefined) {
+      const { x, y, w, h } = input.crop || {};
+      if (![x,y,w,h].every(Number.isFinite) || x < 0 || y < 0 || w <= 0 || h <= 0 ||
+          x+w > 1.00001 || y+h > 1.00001)
+        throw Error("Некорректная область видеофрагмента.");
+      entry.crop = { x, y, w, h };
+    }
+    if (input.clipAction !== undefined) {
+      if (!["mask", "skip"].includes(input.clipAction)) throw Error("Неизвестное действие фрагмента.");
+      entry.clipAction = input.clipAction;
+    }
   } else if (kind !== "name" && kind !== "domain")
     throw Error("Неизвестный тип правила.");
   if (previous) state.entries.splice(state.entries.indexOf(previous),1,{...entry,id:previous.id});
   else state.entries.push(entry);
+  return previous?.id || entry.id;
 }
 async function edit(message) {
   const old = await read(),
     state = structuredClone(old);
-  if (message.action === "add") add(state, message.entry);
+  let savedId;
+  if (message.action === "add") savedId = add(state, message.entry);
   else if (message.action === "remove")
     state.entries = state.entries.filter((e) => e.id !== message.id);
   else if (message.action==="setting" && message.key==="logoThreshold" && Number.isInteger(message.value) &&
@@ -149,12 +174,17 @@ async function edit(message) {
   else throw Error("Неизвестная команда.");
   await applyNetwork(state);
   try {
-    await chrome.storage.local.set({ registry: state });
+    const update = {registry: state};
+    if (message.action === "remove" && old.entries.some(e => e.id === message.id && e.kind === "clip")) {
+      const {clipRanges = []} = await chrome.storage.local.get("clipRanges");
+      update.clipRanges = clipRanges.filter(r => r.id !== message.id);
+    }
+    await chrome.storage.local.set(update);
   } catch (e) {
     await applyNetwork(old);
     throw e;
   }
-  return true;
+  return message.returnId ? savedId : true;
 }
 
 // Cross-origin <img> often displays normally but taints a page canvas. Decode
@@ -270,13 +300,27 @@ async function author(m,sender) {
   if (!session || m.token !== session.token || sender.frameId !== session.frameId)
     throw Error("Откройте редактор заново через значок расширения.");
   if (m.action === "editor-pixels") return selectedPixels(sender,m.rect);
-  return serial(()=>edit({action:"add",entry:m.entry}));
+  return serial(()=>edit({action:"add",entry:m.entry,returnId:true}));
+}
+async function rememberSkip({source, id, start, end}) {
+  if (typeof source !== "string" || !source || source.length > 8192 ||
+      !Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end <= start)
+    throw Error("Некорректные границы пропуска.");
+  const state = await read();
+  const active = new Set(state.entries.filter(e => e.kind === "clip" && e.clipAction !== "mask").map(e => e.id));
+  if (!active.has(id)) return;
+  const {clipRanges = []} = await chrome.storage.local.get("clipRanges");
+  const rows = clipRanges.filter(r => active.has(r.id));
+  if (rows.some(r => r.id === id && r.source === source && Math.abs(r.start-start) < 1)) return;
+  rows.push({source, id, start, end});
+  await chrome.storage.local.set({clipRanges: rows.slice(-256)});
 }
 chrome.runtime.onMessage.addListener((m, sender, reply) => {
   let job;
   if (m?.action === "image" && sender.tab && typeof m.url === "string")
     job = readImage(m.url, m.edge);
   else if (m?.action === "ocr" && sender.tab) job = recognize(m);
+  else if (sender.tab && m?.action === "remember-skip") job=serial(() => rememberSkip(m));
   else if (sender.tab && ["editor-pixels","editor-save"].includes(m?.action)) job=author(m,sender);
   else if (
     sender.url?.startsWith(chrome.runtime.getURL("")) &&

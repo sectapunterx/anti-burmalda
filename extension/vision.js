@@ -37,14 +37,54 @@ globalThis.BurmaldaVision = (() => {
     };
   }
 
-  function surface(source, width, height, edge = 224) {
+  function pixels(width, height, crop) {
+    if (!crop) return [0, 0, width, height];
+    const x = Math.min(width - 1, Math.round(crop.x * width));
+    const y = Math.min(height - 1, Math.round(crop.y * height));
+    return [x, y,
+      Math.max(1, Math.min(width, Math.round((crop.x + crop.w) * width)) - x),
+      Math.max(1, Math.min(height, Math.round((crop.y + crop.h) * height)) - y)];
+  }
+  function surface(source, width, height, edge = 224, crop) {
     const scale = Math.min(1, edge / Math.max(width, height));
     const w = Math.max(1, Math.round(width * scale)),
       h = Math.max(1, Math.round(height * scale));
     const c = new OffscreenCanvas(w, h);
     const ctx = c.getContext("2d", { willReadFrequently: true });
     ctx.drawImage(source, 0, 0, w, h);
-    return ctx.getImageData(0, 0, w, h);
+    return ctx.getImageData(...pixels(w, h, crop));
+  }
+  const clipEdge = 768;
+  // Keep early samples close together even when the selected interval is long.
+  function sampleTimes(duration, limit = 32) {
+    const count = Math.min(limit, Math.max(3, Math.ceil(duration * 2)));
+    const early = Math.min(6, count);
+    const step = Math.min(.55, duration / count);
+    return Array.from({length: count}, (_, i) => i < early ? (i + .15) * step :
+      early * step + (i - early + .15) * (duration - early * step) / (count - early));
+  }
+  function clipSurface(video, crop) {
+    return surface(video, video.videoWidth, video.videoHeight, crop ? clipEdge : 224, crop);
+  }
+  // Only anchor timestamps to identifiable recordings, never to a channel or a live playlist.
+  function clipSource(video) {
+    if (!Number.isFinite(video.duration) || video.srcObject) return null;
+    const page = new URL(location.href);
+    if (/(^|\.)twitch\.tv$/.test(page.hostname)) {
+      if (!video.closest("[data-a-target='video-player'],[data-test-selector='video-player__video-container']")) return null;
+      const id = /^\/videos\/(\d+)\/?$/.exec(page.pathname)?.[1];
+      return id ? "twitch:" + id : null;
+    }
+    if (/(^|\.)youtube(?:-nocookie)?\.com$/.test(page.hostname)) {
+      if (!video.matches(".html5-video-player video.html5-main-video") ||
+          video.closest(".ytp-live,.ad-showing,.ad-interrupting")) return null;
+      const id = page.pathname === "/watch" ? page.searchParams.get("v") :
+        /^\/(?:shorts|embed)\/([\w-]+)/.exec(page.pathname)?.[1];
+      return id && /^[\w-]{11}$/.test(id) ? "youtube:" + id : null;
+    }
+    if (!/^https?:\/\//i.test(video.currentSrc)) return null;
+    const url = new URL(video.currentSrc);
+    return !url.search && /\.(mp4|webm|ogv|mov|m4v)$/i.test(url.pathname) ? url.origin + url.pathname : null;
   }
 
   function at(image, sig, left, top, width, height, threshold) {
@@ -124,37 +164,37 @@ globalThis.BurmaldaVision = (() => {
   // Match two distinct ordered keyframes on the media clock, then cover the
   // remainder of that reference clip. A single keyframe masks only that instant.
   function clipMatch(image, rule, time, track) {
-    let seen = -1;
+    const seen = [];
     const wiggle = 0.85;
+    const bounds = pixels(image.width, image.height, rule.crop);
     for (let i = 0; i < rule.frames.length; i++) {
       const { sample } = rule.frames[i];
       if (
-        Math.abs(Math.log(image.width / image.height / sample.aspect)) < 0.22 &&
-        at(image, sample, 0, 0, image.width, image.height)
+        Math.abs(Math.log(bounds[2] / bounds[3] / sample.aspect)) < 0.22 &&
+        at(image, sample, ...bounds)
       ) {
-        seen = i;
-        break;
+        seen.push(i);
       }
     }
-    if (seen >= 0) {
-      const offset = rule.frames[seen].time;
-      if (
-        track.index !== undefined &&
-        seen > track.index &&
-        Math.abs(
-          time - track.time - (offset - rule.frames[track.index].time),
-        ) <= wiggle
-      ) {
-        track.until = time + rule.duration - offset;
+    if (track.indices && time - track.lastSeen > rule.duration + wiggle)
+      delete track.indices;
+    if (seen.length) {
+      const sameScene = track.indices?.some(index => seen.includes(index));
+      if (track.indices && !sameScene) {
+        // A still section can span several reference samples. Its first and
+        // last observations bracket the transition even when playback joined mid-hold.
+        const next = seen.find(index => track.indices.some(previous => {
+          const elapsed = rule.frames[index].time - rule.frames[previous].time;
+          return elapsed > 0 && elapsed >= time - track.lastSeen - wiggle &&
+            elapsed <= time - track.firstSeen + wiggle;
+        }));
+        if (next !== undefined) track.until = time + rule.duration - rule.frames[next].time;
       }
-      if (seen !== track.index) {
-        track.index = seen;
-        track.time = time;
-      }
+      if (!sameScene) track.firstSeen = time;
+      track.indices = seen;
+      track.lastSeen = time;
     }
-    if (track.index !== undefined && time - track.time > rule.duration + wiggle)
-      delete track.index;
-    return seen >= 0 || time < (track.until ?? -Infinity);
+    return seen.length > 0 || time < (track.until ?? -Infinity);
   }
-  return { signature, surface, at, locate, clipMatch, full };
+  return { signature, surface, at, locate, clipMatch, clipSource, clipSurface, clipEdge, sampleTimes, full };
 })();

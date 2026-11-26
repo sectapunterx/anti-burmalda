@@ -7,6 +7,7 @@ require("../extension/logomatch.js");
 require("../extension/registry.js");
 require("../extension/vision.js");
 require("../extension/animation.js");
+require("../extension/twitch-cycles.js");
 const registry = BurmaldaRegistry, vision = BurmaldaVision;
 
 test("YouTube audio needs offsets enclosing only the matched words", () => {
@@ -54,6 +55,28 @@ test("portable logo matching at multiple sizes uses the threshold and rejects a 
   assert.equal(next.logoThreshold,91);
   const removed={...next,entries:[]};
   assert.equal(registry.upgrade(removed).entries.length,0);
+  const userRule={id:"local",kind:"name",value:"Local rule"};
+  const upgraded=registry.upgrade({catalogVersion:3,entries:[userRule]});
+  const additions=BurmaldaLogoCatalog.filter(e=>e.since>=5);
+  assert.equal(additions.length,12);
+  assert.deepEqual(upgraded.entries.map(e=>e.id), [userRule.id,"catalog:logo:bb-yellow-promo","catalog:logo:bb-gold-promo",...additions.map(e=>e.id)]);
+  const yellow=BurmaldaLogoCatalog.find(e=>e.id==="catalog:logo:bb-yellow-promo");
+  const old={...yellow,panelPhases:yellow.panelPhases.slice(0,2)};
+  const fromV4=registry.upgrade({catalogVersion:4,entries:[userRule,old]});
+  assert.deepEqual(fromV4.entries,[userRule,yellow,...additions]);
+  assert(!registry.upgrade({catalogVersion:4,entries:[userRule]}).entries.some(e=>e.id===yellow.id));
+  const v5=registry.upgrade({catalogVersion:5,entries:[userRule]});
+  assert.deepEqual(v5.entries,[userRule,BurmaldaLogoCatalog.find(e=>e.since===6)]);
+});
+
+test("plain yellow panels do not identify a promo and anchor geometry clips at the image edge",()=>{
+  const L=BurmaldaLogos;
+  const t=L.prepareRule(BurmaldaLogoCatalog.find(e=>e.panelPhases));
+  const frame={width:160,height:110,data:new Uint8ClampedArray(160*110*4)};
+  for(let y=24;y<46;y++)for(let x=20;x<94;x++)frame.data.set([249,244,34,255],4*(y*160+x));
+  assert.deepEqual(L.locate([frame],t,86),[]);
+  const box=L.bannerBox({x:0,y:.5,w:.125,h:.25},{x:.125,y:0,w:.25,h:1});
+  assert.deepEqual(box,{x:0,y:.5,w:.4375,h:.25});
 });
 
 test("animation detection requires repeated motion and ignores changing footage behind the banner", () => {
@@ -80,6 +103,28 @@ test("animation detection requires repeated motion and ignores changing footage 
   assert.equal(motion.match(new Uint8Array(576),compiled,track,9),false);
 });
 
+test("dark scenery cannot acquire or renew an animation mask by palette alone",()=>{
+  const cycle=BurmaldaAnimation.compile(BurmaldaTwitchCycles[0].cycle);
+  const rgb=new Uint8Array(16*12*3), track={};
+  function scenery(i) {
+    const tone=i%2 ? [42,30,42] : [60,39,50];
+    for(let cell=0;cell<16*12;cell++)
+      rgb.set(tone.map(v=>v+(cell%9)-4),cell*3);
+  }
+  for(let i=0;i<24;i++) {
+    scenery(i);
+    assert.equal(BurmaldaAnimation.match(rgb,cycle,track,i*.5),false);
+  }
+  for(const [j,cell] of cycle.cells.entries())
+    rgb.set(cycle.frames[4].subarray(j*3,j*3+3),cell*3);
+  assert.equal(BurmaldaAnimation.match(rgb,cycle,track,12),true);
+  for(let i=0;i<14;i++) {
+    scenery(i);
+    BurmaldaAnimation.match(rgb,cycle,track,12.5+i*.5);
+  }
+  assert.equal(track.active,false);
+});
+
 test("whole words, Cyrillic, punctuation and exact domain boundaries", () => {
   const matcher = registry.matcher([
     {kind:"name",value:"Моя ставка"}, {kind:"name",value:"A+B"},
@@ -103,7 +148,7 @@ test("starter catalog protects requested brands and leaves unrelated software, s
   for (const label of ["1WIN", "1вин", "Upgrader", "Скины на Апгрейдер", "MUSOR_DROP", "мусордроп", "Winline", "Винлайн", "Bet-Boom", "Бетбум"]) {
     assert(match.matches(label).length > 0, label);
   }
-  for (const text of ["firmware upgrader for Linux", "апгрейдер прошивки", "ФК Зенит", "заключить пари", "at stake", "пакет для мусора", "twinlines"]) {
+  for (const text of ["firmware upgrader for Linux", "апгрейдер прошивки", "ФК Зенит", "заключить пари", "at stake", "пакет для мусора", "twinlines", "!GGsel", "ГГсел — пополнение Steam"]) {
     assert.equal(match.matches(text).length, 0, text);
   }
   const [rule] = registry.networkRules(state);
@@ -111,7 +156,7 @@ test("starter catalog protects requested brands and leaves unrelated software, s
     assert(rule.condition.requestDomains.includes(host), host);
     assert(match.address("https://cdn." + host + "/image"));
   }
-  for (const host of ["fanatics.com", "github.com", "steamcommunity.com", "t.me"]) {
+  for (const host of ["fanatics.com", "github.com", "steamcommunity.com", "t.me", "ggsel.net"]) {
     assert(!match.address("https://" + host + "/news"));
     assert(!rule.condition.requestDomains.includes(host));
   }
@@ -173,5 +218,17 @@ test("ordered samples cover intervening frames only for the reference duration",
   vision.clipMatch(second,rule,2,reversed);
   vision.clipMatch(first,rule,3,reversed);
   assert(!vision.clipMatch(neutral,rule,3.5,reversed));
+});
+test("joining halfway through a held shot still confirms the following cut",()=>{
+  const first=frame(), second=frame(true);
+  const rule={duration:6,frames:[0,1,2,3,4].map(time=>({
+    time,sample:vision.signature(time===4 ? second : first)
+  }))};
+  const track={};
+  vision.clipMatch(first,rule,100,track);
+  vision.clipMatch(first,rule,100.5,track);
+  assert.equal(track.until,undefined);
+  vision.clipMatch(second,rule,101,track);
+  assert.equal(track.until,103);
 });
 

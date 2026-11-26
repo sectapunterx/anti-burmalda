@@ -116,13 +116,29 @@ globalThis.BurmaldaAnimation = (() => {
         );
       return colors.size >= 7;
     });
-    return { ...cycle, frames, textured };
+    const shape = frames.map(frame => {
+      const mean = [0,0,0];
+      for (let i=0;i<frame.length;i++) mean[i%3]+=frame[i]/cycle.cells.length;
+      const centered = Float32Array.from(frame,(v,i)=>v-mean[i%3]);
+      return {centered, energy:centered.reduce((sum,v)=>sum+v*v,0)};
+    });
+    return { ...cycle, frames, textured, shape };
   }
   function match(rgb, cycle, state, now) {
     let best = -1,
       bestError = Infinity;
+    const sums=[0,0,0];
+    let squares=0;
+    for(const cell of cycle.cells) for(let c=0;c<3;c++) {
+      const v=rgb[cell*3+c];
+      sums[c]+=v;
+      squares+=v*v;
+    }
+    const n=cycle.cells.length;
+    const energy=Math.max(0,squares-sums.reduce((s,v)=>s+v*v,0)/n);
     for (const [phase, frame] of cycle.frames.entries()) {
-      let error = 0,
+      const shape=cycle.shape[phase];
+      let error = 0, dot=0,
         close = 0;
       for (const [j, cell] of cycle.cells.entries()) {
         const i = cell * 3,
@@ -133,9 +149,16 @@ globalThis.BurmaldaAnimation = (() => {
           Math.abs(rgb[i + 2] - frame[k + 2]);
         error += Math.min(d, 200);
         if (d < 94) close++;
+        dot+=rgb[i]*shape.centered[k]+rgb[i+1]*shape.centered[k+1]+rgb[i+2]*shape.centered[k+2];
       }
+      // Similar dark colours in gameplay can alternate between several phases.
+      // Require contrast in the same cells. A uniform authored phase needs
+      // a close, equally uniform colour match and a second phase to start.
+      const flat=shape.energy<n*3*12**2;
+      const sameShape=flat ? energy<n*3*18**2 && error/n<32 :
+        energy>shape.energy*.13 && dot>.67*Math.sqrt(energy*shape.energy);
       if (
-        close >= cycle.cells.length * 0.65 &&
+        sameShape && close >= cycle.cells.length * 0.65 &&
         error / cycle.cells.length < 77 &&
         error < bestError
       ) {
@@ -146,7 +169,7 @@ globalThis.BurmaldaAnimation = (() => {
     const hold = Math.min(4.5, Math.max(1.3, cycle.duration * 0.36));
     if (now < state.time || now - state.time > hold) state.active = false;
     if (best >= 0) {
-      if (cycle.textured[best] && bestError / cycle.cells.length < 39)
+      if (cycle.textured[best] && cycle.shape[best].energy>=n*3*12**2 && bestError / n < 39)
         state.active = true;
       if (
         state.phase !== undefined &&

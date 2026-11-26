@@ -57,13 +57,17 @@ globalThis.BurmaldaRegistry = (() => {
     }
   }
   function upgrade(stored) {
-    if (stored.catalogVersion >= 3) return stored;
+    if (stored.catalogVersion >= 6) return stored;
     const existing = new Set(stored.entries.map(keyOf));
-    const incoming=stored.catalogVersion>=2 ? BurmaldaLogoCatalog : [...additions,...BurmaldaLogoCatalog];
+    const version=stored.catalogVersion || 1;
+    const incoming=BurmaldaLogoCatalog.filter(e=>(e.since || (e.anchor ? 4 : 3))>version);
+    if(version<2) incoming.unshift(...additions);
+    const yellow=BurmaldaLogoCatalog.find(e=>e.id==="catalog:logo:bb-yellow-promo");
+    const entries=stored.entries.map(e=>version<5 && e.id===yellow.id ? {...e,panelPhases:yellow.panelPhases} : e);
     return {
       ...stored,
-      catalogVersion: 3,
-      entries: [...stored.entries, ...incoming.filter(e => !existing.has(keyOf(e))).map(e => ({ ...e }))],
+      catalogVersion: 6,
+      entries: [...entries, ...incoming.filter(e => !existing.has(keyOf(e))).map(e => ({ ...e }))],
     };
   }
   const defaults = () => upgrade({

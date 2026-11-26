@@ -3,7 +3,7 @@
   "minimum_chrome_version": "120",
   "name": "Анти-бурмалда",
   "description": "Скрывает упоминания азартных игр, баннеры и знакомые рекламные вставки по вашему локальному реестру.",
-  "version": "0.5.6",
+  "version": "0.5.11",
   "content_security_policy": {
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
   },
@@ -30,7 +30,7 @@
       "all_frames": true,
       "match_origin_as_fallback": true,
       "run_at": "document_start",
-      "js": ["catalog.js", "logo-catalog.js", "registry.js", "vision.js", "logomatch.js", "campaign.js", "regions.js", "animation.js", "twitch-cycles.js", "youtube.js", "content.js", "editor.js"],
+      "js": ["catalog.js", "logo-catalog.js", "registry.js", "vision.js", "logomatch.js", "campaign.js", "regions.js", "animation.js", "twitch-cycles.js", "youtube.js", "timeline.js", "content.js", "editor.js"],
       "css": ["content.css"]
     },
     {

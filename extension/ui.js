@@ -30,7 +30,7 @@ function renderList() {
       name = document.createElement("span"),
       kind = document.createElement("small");
     name.textContent = e.value;
-    kind.textContent = e.region ? (e.kind === "animation" ? "Анимация" : "Область") + " · " + new URL(e.region.page).hostname : labels[e.kind];
+    kind.textContent = e.anchor ? "Баннер с промокодом" : e.region ? (e.kind === "animation" ? "Анимация" : "Область") + " · " + new URL(e.region.page).hostname : labels[e.kind];
     name.append(kind);
     const remove = document.createElement("button");
     remove.className = "remove";
@@ -143,7 +143,7 @@ function formatForm() {
     domain:
       "Блокирует загрузку ресурсов с домена и его поддоменов, скрывает ссылки на них.",
     logo: "Загрузите чёткий образец и обрежьте лишние поля. Ищем тот же рисунок на баннерах и в кадрах видео.",
-    clip: "Загрузите рекламный фрагмент от 1 до 60 секунд. Расширение сравнит последовательность кадров в других роликах и трансляциях.",
+    clip: "Загрузите рекламную вставку длительностью от одной секунды. Расширение сравнит образцы кадров в других роликах и трансляциях.",
   }[k];
   status("form-status", "");
 }
@@ -184,12 +184,10 @@ async function clipEntry(file) {
       v.src = url;
     });
     const duration = v.duration;
-    if (!Number.isFinite(duration) || duration < 1 || duration > 60)
-      throw Error("Нужен фрагмент длительностью от 1 до 60 секунд.");
-    const count = Math.min(32, Math.max(3, Math.ceil(duration * 2))),
-      frames = [];
-    for (let i = 0; i < count; i++) {
-      const time = ((i + 0.15) * duration) / count;
+    if (!Number.isFinite(duration) || duration < 1)
+      throw Error("Нужен видеофайл с известной длительностью от одной секунды.");
+    const frames = [];
+    for (const time of BurmaldaVision.sampleTimes(duration)) {
       await onMedia(v, "seeked", () => {
         v.currentTime = time;
       });

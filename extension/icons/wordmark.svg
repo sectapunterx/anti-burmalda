@@ -1,5 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="248" height="44" viewBox="0 0 248 44">
+<svg xmlns="http://www.w3.org/2000/svg" width="248" height="62" viewBox="0 0 248 62">
   <title>анти-бурмалда</title>
   <path fill="#41f59e" d="M4 9 20 2l14 6-28 24Q4 27 4 23Zm5 26L36 12v11q0 11-16 19-7-3-11-7Z"/>
   <text x="45" y="31" font-family="Arial, sans-serif" font-size="28" font-weight="700" fill="#edfff5" textLength="198" lengthAdjust="spacingAndGlyphs">анти-бурмалда</text>
+  <text x="124" y="56" text-anchor="middle" font-family="Arial, sans-serif" font-size="13" fill="#a6f7ce" text-decoration="underline">github.com/sectapunterx/anti-burmalda</text>
 </svg>

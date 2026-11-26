@@ -47,8 +47,11 @@
       .status:empty{display:none}
       .replace input{width:auto;margin:0 6px 0 0}
       .actions{justify-content:space-between;margin-top:8px}
+      .clip-options{display:grid;gap:8px;margin:8px 0}
+      .clip-options select{font:inherit;border-radius:5px}
       .primary{background:#92ecc0;color:#112a1b;font-weight:650}
       .preview{display:block;max-width:100%;max-height:78px;margin:6px 0 9px}
+      .anchor{display:block;max-width:100%;max-height:180px;width:auto;height:auto;cursor:crosshair;touch-action:none}
       .layer{position:absolute;inset:0;pointer-events:auto;cursor:crosshair;touch-action:none}
       .outline{position:absolute;border:2px solid #9affc8;box-shadow:0 0 0 1px #123c29;pointer-events:none}
       .tip{position:absolute;top:10px;left:50%;transform:translateX(-50%);padding:8px 12px;text-align:center;pointer-events:none}
@@ -61,8 +64,21 @@
         <div class="hint"></div>
         <label><span class="label"></span><input maxlength="100" autocomplete="off"></label>
         <img class="preview" alt="Выбранный образец" hidden>
+        <canvas class="anchor" aria-label="Выделите постоянный рисунок на снимке баннера" hidden></canvas>
         <label class="replace" hidden><input type="checkbox"><span></span></label>
         <div class="status" role="status" aria-live="polite"></div>
+        <div class="clip-options" hidden>
+          <button class="clip-area">Выбрать область</button>
+          <label>При совпадении <select class="clip-action">
+            <option value="skip">Пропустить, если можно</option>
+            <option value="mask">Закрыть без перемотки</option>
+          </select></label>
+          <div class="seek-controls" hidden aria-label="Перемотка">
+            <button data-seconds="-10">−10 с</button>
+            <button data-seconds="10">+10 с</button>
+            <button data-seconds="60">+1 мин</button>
+          </div>
+        </div>
         <div class="actions"><button class="pick"></button><button class="primary">Сохранить</button></div>
       </section>
       <div class="layer" hidden><div class="outline" hidden></div></div>
@@ -86,6 +102,8 @@
       animationJob,
       previousRule,
       recording,
+      bannerImage, anchorDrag,
+      clipMark,
       drag,
       choosing,
       disposed = false,
@@ -95,6 +113,7 @@
       name: "Название",
       logo: "Баннер",
       reference: "Логотип",
+      family: "Баннер с промокодом",
       animation: "Анимация",
       clip: "Фрагмент",
       domain: "Домен",
@@ -104,9 +123,10 @@
       logo: "Обведите знак на вебке или всю область анимации. После сохранения маска будет постоянно закрывать это место на этой странице.",
       reference:
         "Обведите только знак. Расширение будет искать похожий рисунок в разных местах и масштабах. Порог совпадения задаётся в настройках.",
+      family: "Обведите весь баннер. Затем на снимке выделите постоянный рисунок или эмблему без промокода.",
       animation:
         "Обведите один движущийся баннер со всеми его положениями. Запись остановится, когда движение повторится. Отдельную GIF-картинку можно выбрать щелчком.",
-      clip: "Отметьте начало и конец во время просмотра. Такие же вставки будут пропускаться в других роликах.",
+      clip: "Обведите вставку или нажмите «Начало фрагмента» для всего кадра. Перемотайте к концу на шкале плеера или кнопками и нажмите «Конец фрагмента».",
       domain: "Укажите домен рекламодателя. Можно выбрать ссылку на странице.",
     };
     async function request(action, extra) {
@@ -119,13 +139,20 @@
       save.disabled =
         pending ||
         !input.value.trim() ||
-        (["logo", "reference", "clip", "animation"].includes(mode) && !draft);
+        (["logo", "reference", "family", "clip", "animation"].includes(mode) && !draft);
       pick.disabled = pending;
+      get(".clip-area").disabled = pending || !!recording;
     }
     function releaseRecording() {
       if (!recording) return;
       clearInterval(recording.timer);
       recording.events.abort();
+      const {video, restore} = recording;
+      if (restore && sameRecording(recording)) {
+        video.currentTime = restore.time;
+        if (restore.playing) video.play().catch(() => {});
+      }
+      get(".seek-controls").hidden = true;
       BurmaldaRecording.delete(recording.video);
       recording = null;
     }
@@ -158,6 +185,11 @@
       stopPicking();
       draft = null;
       mode = kind;
+      bannerImage = anchorDrag = null;
+      get(".anchor").hidden = true;
+      clipMark = null;
+      get(".clip-options").hidden = kind !== "clip";
+      get(".clip-action").value = "skip";
       save.textContent = "Сохранить";
       note.textContent = "";
       preview.hidden = true;
@@ -177,7 +209,7 @@
           input.value = new URL(details.link).hostname;
         } catch {}
       }
-      if (["logo", "reference", "clip", "animation"].includes(kind))
+      if (["logo", "reference", "family", "clip", "animation"].includes(kind))
         input.value =
           titles[kind] +
           " · " +
@@ -188,6 +220,7 @@
         name: "Выделить текст",
         logo: "Выбрать область",
         reference: "Выбрать логотип",
+        family: "Выбрать баннер",
         animation: "Выбрать анимацию",
         clip: "Начало фрагмента",
         domain: "Выбрать ссылку",
@@ -206,6 +239,8 @@
           "Обведите один баннер с небольшим запасом или нажмите на отдельную GIF · Esc для отмены",
         domain: "Нажмите на ссылку рекламодателя · Esc для отмены",
         clip: "Нажмите на нужный плеер · Esc для отмены",
+        clipArea: "Обведите вставку внутри видео. Запись начнётся, когда вы отпустите мышь · Esc для отмены",
+        family: "Обведите баннер целиком, включая промокод · Esc для отмены",
       }[kind];
     }
     // Picking in the frame where the editor was invoked also works in embedded players.
@@ -278,7 +313,7 @@
     async function capture(rect, media) {
       const version = ++step;
       const region =
-        mode === "reference" ? null : BurmaldaRegions.capture(media, rect);
+        mode === "reference" || mode === "family" ? null : BurmaldaRegions.capture(media, rect);
       draft = null;
       pending = true;
       refresh();
@@ -307,6 +342,18 @@
         img.src = data;
         await img.decode();
         if (disposed || version !== step) return;
+        if (mode === "family") {
+          bannerImage = img;
+          const canvas = get(".anchor");
+          canvas.width = img.width;
+          canvas.height = img.height;
+          canvas.style.width = Math.min(320, 180*img.width/img.height) + "px";
+          canvas.getContext("2d").drawImage(img,0,0);
+          canvas.hidden = false;
+          pick.textContent = "Выбрать заново";
+          note.textContent = "Теперь обведите на снимке постоянный рисунок. Остальная часть баннера может меняться.";
+          return;
+        }
         const frame = BurmaldaVision.surface(img, img.width, img.height);
         const template = mode === "reference" && BurmaldaLogos.template(frame);
         draft =
@@ -340,6 +387,44 @@
         }
       }
     }
+    const anchorCanvas = get(".anchor");
+    function anchorPoint(e) {
+      const r = anchorCanvas.getBoundingClientRect();
+      const unit = n => Math.max(0, Math.min(1, n));
+      return [unit((e.clientX-r.left)/r.width), unit((e.clientY-r.top)/r.height)];
+    }
+    anchorCanvas.onpointerdown = e => {
+      if (e.button !== 0 || !bannerImage || anchorDrag) return;
+      anchorDrag = { point:anchorPoint(e), id:e.pointerId };
+      anchorCanvas.setPointerCapture(e.pointerId);
+      draft = null;
+      refresh();
+    };
+    function selectAnchor(e) {
+      if (!anchorDrag || e.pointerId !== anchorDrag.id) return;
+      const [ax,ay] = anchorDrag.point, [bx,by] = anchorPoint(e);
+      const W = anchorCanvas.width, H = anchorCanvas.height;
+      const x = Math.floor(Math.min(ax,bx)*W), y = Math.floor(Math.min(ay,by)*H);
+      const w = Math.ceil(Math.max(ax,bx)*W)-x, h = Math.ceil(Math.max(ay,by)*H)-y;
+      const ctx = anchorCanvas.getContext("2d");
+      ctx.drawImage(bannerImage,0,0);
+      if (e.type === "pointerup") {
+        anchorDrag = null;
+        if (w >= 6 && h >= 6) {
+          const anchor = {x:x/W,y:y/H,w:w/W,h:h/H};
+          const template = BurmaldaLogos.template(ctx.getImageData(x,y,w,h));
+          if (BurmaldaLogos.validAnchor(anchor) && BurmaldaLogos.prepare(template)) draft = {template, anchor};
+        }
+        note.textContent = draft ? "Образец готов. При совпадении маска закроет весь баннер."
+          : "Выберите более крупный участок с различимым рисунком.";
+        refresh();
+      }
+      ctx.strokeStyle = "#41f59e";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(x,y,w,h);
+    }
+    anchorCanvas.onpointermove = anchorCanvas.onpointerup = selectAnchor;
+    anchorCanvas.onpointercancel = () => { anchorDrag=null; };
     function stopAnimation() {
       if (!animationJob) return;
       clearInterval(animationJob.timer);
@@ -477,13 +562,15 @@
       job.timer = setInterval(sample, 245);
       sample();
     }
-    function begin(video) {
+    function begin(video, crop) {
       if (!video || video.readyState < 2 || !video.videoWidth) {
         note.textContent = "Сначала запустите видео.";
         return;
       }
       const rec = {
         video,
+        crop,
+        source: BurmaldaVision.clipSource(video),
         start: video.currentTime,
         src: video.currentSrc,
         stream: video.srcObject,
@@ -503,37 +590,26 @@
         refresh();
       }
       function sample() {
-        if (
-          !video.isConnected ||
-          rec.src !== video.currentSrc ||
-          rec.stream !== video.srcObject ||
-          video.seeking
-        ) {
-          abort("Видео сменилось или было перемотано. Отметьте начало заново.");
+        if (!sameRecording(rec)) {
+          abort("Видео сменилось. Отметьте начало заново.");
           return;
         }
+        get(".seek-controls").hidden = !video.seekable.length;
+        if (video.seeking || video.readyState < 2) return;
         const time = video.currentTime - rec.start;
-        if (time >= 60) {
-          finish();
-          return;
-        }
         if (time < 0) {
-          abort("Отметьте начало заново.");
+          note.textContent = "Начало отмечено в " + clock(rec.start) + ". Выберите конец позже этой отметки.";
           return;
         }
         note.textContent =
           "Запись " +
           clock(time) +
-          " / 1:00 · начало " +
+          " · начало " +
           clock(rec.start) +
           (video.paused ? " · пауза" : "");
         if (time - (rec.frames.at(-1)?.time ?? -1) < rec.interval) return;
         try {
-          const frame = BurmaldaVision.surface(
-            video,
-            video.videoWidth,
-            video.videoHeight,
-          );
+          const frame = BurmaldaVision.clipSurface(video, crop);
           const signature = BurmaldaVision.signature(frame);
           if (!rec.frames.length) {
             const c = document.createElement("canvas");
@@ -544,7 +620,7 @@
             preview.hidden = false;
           }
           if (rec.frames.length >= 32) {
-            rec.frames = rec.frames.filter((_, i) => i % 2 === 0);
+            rec.frames = rec.frames.filter((_, i) => i < 6 || i % 2 === 0);
             rec.interval *= 2;
           }
           rec.frames.push({ time, sample: signature });
@@ -560,25 +636,102 @@
       rec.timer = setInterval(sample, 150);
       video.addEventListener(
         "seeking",
-        () => abort("После перемотки отметьте начало заново."),
+        () => { rec.scrubbed = true; },
         { signal: rec.events.signal },
       );
       video.addEventListener("ended", finish, { signal: rec.events.signal });
       sample();
     }
-    function finish() {
+    function sameRecording(rec) {
+      return rec.video.isConnected && rec.src === rec.video.currentSrc &&
+        rec.stream === rec.video.srcObject &&
+        (!rec.source || BurmaldaVision.clipSource(rec.video) === rec.source);
+    }
+    get(".seek-controls").onclick = event => {
+      const button = event.target.closest("[data-seconds]");
+      if (!recording || pending || !button) return;
+      const {video, start} = recording;
+      const ranges = video.seekable;
+      for (let i = 0; i < ranges.length; i++) {
+        if (video.currentTime < ranges.start(i) || video.currentTime > ranges.end(i)) continue;
+        video.currentTime = Math.min(ranges.end(i), Math.max(ranges.start(i), start,
+          video.currentTime + Number(button.dataset.seconds)));
+        break;
+      }
+    };
+    function seekFrame(video, time, signal) {
+      return new Promise((resolve, reject) => {
+        const listeners = new AbortController();
+        const done = ok => {
+          clearTimeout(timer);
+          listeners.abort();
+          signal.removeEventListener("abort", cancel);
+          if (ok) resolve();
+          else reject(Error("Плеер не дал прочитать кадры после перемотки."));
+        };
+        const cancel = () => done(false);
+        const timer = setTimeout(cancel, 5000);
+        signal.addEventListener("abort", cancel, {once:true});
+        video.addEventListener("seeked", () => done(Math.abs(video.currentTime - time) < .3),
+          {once:true, signal:listeners.signal});
+        video.addEventListener("error", cancel, {once:true, signal:listeners.signal});
+        try { video.currentTime = time; } catch { cancel(); }
+      });
+    }
+    async function finish() {
       const rec = recording;
-      if (!rec) return;
-      const duration = Math.min(60, rec.video.currentTime - rec.start),
-        frames = rec.frames.filter((f) => f.time < duration);
-      if (duration < 1 && !rec.video.ended) {
-        note.textContent = "Для образца нужна хотя бы секунда воспроизведения.";
+      if (!rec || pending) return;
+      const video = rec.video;
+      if (!sameRecording(rec)) {
+        releaseRecording();
+        setMode("clip");
+        note.textContent = "Видео сменилось. Отметьте начало заново.";
         return;
+      }
+      const end = video.currentTime, duration = end - rec.start;
+      let frames = rec.frames.filter(f => f.time < duration);
+      if (duration < 1 && !rec.video.ended) {
+        note.textContent = "Выберите конец хотя бы на секунду позже начала.";
+        return;
+      }
+      if (duration >= 1 && (rec.scrubbed || video.seeking) && video.seekable.length) {
+        pending = true;
+        refresh();
+        clearInterval(rec.timer);
+        rec.restore = { time: end, playing: !video.paused };
+        video.pause();
+        get(".seek-controls").hidden = true;
+        const samples = [];
+        try {
+          const times = BurmaldaVision.sampleTimes(duration, 12);
+          for (const [index, time] of times.entries()) {
+            if (!sameRecording(rec)) throw Error("Видео сменилось.");
+            note.textContent = "Считываю кадры · " + (index + 1) + " из " + times.length;
+            await seekFrame(video, rec.start + time, rec.events.signal);
+            if (!sameRecording(rec)) throw Error("Видео сменилось.");
+            const frame = BurmaldaVision.clipSurface(video, rec.crop);
+            try { samples.push({time, sample: BurmaldaVision.signature(frame)}); }
+            catch { /* Uniform frames are not useful for recognition. */ }
+          }
+          if (samples.length >= 2) frames = samples;
+        } catch (err) {
+          if (recording !== rec) return;
+          if (!sameRecording(rec) || frames.length < 2) {
+            releaseRecording();
+            setMode("clip");
+            note.textContent = err.message;
+            return;
+          }
+        }
+        pending = false;
       }
       releaseRecording();
       pick.textContent = "Записать заново";
       if (duration >= 1 && frames.length >= 2) {
-        draft = { duration, frames };
+        clipMark = {video, src:rec.src, stream:rec.stream, start:rec.start, end, source:rec.source};
+        draft = { duration, frames, ...(rec.crop && { crop: rec.crop }) };
+        if (rec.source && BurmaldaVision.clipSource(rec.video) === rec.source)
+          draft.origin = { source: rec.source, start: rec.start };
         note.textContent =
           "Границы " +
           clock(rec.start) +
@@ -598,10 +751,11 @@
       b.dataset.kind = kind;
       b.onclick = () => {
         setMode(kind);
-        if (kind === "animation" || kind === "reference") startPicking(kind);
+        if (["animation", "reference", "family"].includes(kind)) startPicking(kind);
       };
       get(".tabs").append(b);
     }
+    get(".clip-area").onclick = () => startPicking("clipArea");
     pick.onclick = () => {
       if (animationJob) {
         finishAnimation(null, "Запись остановлена.");
@@ -659,7 +813,7 @@
       if (
         !drag ||
         drag.id !== e.pointerId ||
-        !["logo", "reference", "animation"].includes(choosing)
+        !["logo", "reference", "family", "animation", "clipArea"].includes(choosing)
       )
         return;
       const r = rectTo(e.clientX, e.clientY);
@@ -693,6 +847,18 @@
       if (kind === "clip") {
         stopPicking();
         begin(mediaIn(items, "video"));
+        return;
+      }
+      if (kind === "clipArea") {
+        stopPicking();
+        const video = mediaIn(items, "video");
+        const region = video && BurmaldaRegions.capture(video, r);
+        if (r.w < 8 || r.h < 6 || !region?.intrinsic) {
+          note.textContent = "Обведите вставку внутри изображения видео, без полей плеера.";
+          return;
+        }
+        const { x, y, w, h } = region;
+        begin(video, { x, y, w, h });
         return;
       }
       const media = BurmaldaRegions.targetAt(items, r);
@@ -748,16 +914,21 @@
         const pinned = !!draft?.region,
           animation = mode === "animation" && !draft.fixed;
         const { fixed, ...data } = draft || {};
-        await request("editor-save", {
+        const mark = mode === "clip" && get(".clip-action").value === "skip" && clipMark;
+        const savedId = await request("editor-save", {
           entry: {
-            kind: fixed || mode === "reference" ? "logo" : mode,
+            kind: fixed || mode === "reference" || mode === "family" ? "logo" : mode,
             value: input.value.trim(),
             ...data,
+            ...(mode === "clip" && { clipAction: get(".clip-action").value }),
             ...(animation &&
               previousRule &&
               get(".replace input").checked && { replace: previousRule.id }),
           },
         });
+        if (mark && !mark.source && mark.video.currentSrc === mark.src && mark.video.srcObject === mark.stream) {
+          BurmaldaTimeline.local(mark.video, null).push({id:savedId, start:mark.start, end:mark.end});
+        }
         if (disposed || version !== step) return;
         setMode(mode);
         input.value = "";
@@ -766,7 +937,7 @@
           : pinned
             ? "Область закреплена. Маска действует, пока правило включено."
             : "Правило сохранено в реестре.";
-        if (["logo", "reference", "clip", "animation"].includes(mode))
+        if (["logo", "reference", "family", "clip", "animation"].includes(mode))
           input.value =
             titles[mode] +
             " · " +
